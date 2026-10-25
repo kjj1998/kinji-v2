@@ -186,8 +186,8 @@ incomplete or confidence is low.
 
 | # | What | Depends on | Notes |
 |---|---|---|---|
-| 1 | AWS account, budget alert, admin access for Terraform | - | Budget alert first; a public URL is the one way this can cost money |
-| 2 | Terraform state backend: S3 bucket with `use_lockfile` | 1 | No DynamoDB lock table needed |
+| 1 | AWS account, budget alert, admin access for Terraform | - | **Done 2026-10-25.** Budget alert first; a public URL is the one way this can cost money. `infra/bootstrap`: $5/month COST budget, emails at 80% actual and 100% forecasted. Terraform runs as SSO profile `admin` |
+| 2 | Terraform state backend: S3 bucket with `use_lockfile` | 1 | **Done 2026-10-25.** No DynamoDB lock table needed. Bucket `kinji-v2-tfstate-271407076537` (versioned, SSE, public access blocked, TLS-only policy, noncurrent versions expire after 90 days); bootstrap state at `bootstrap/terraform.tfstate` |
 | 3 | Neon project in `ap-southeast-1` | - | Can be done in parallel with 1-2 |
 | 4 | Migrations: `users`, `api_tokens`, `capture_events` | 3 | goose or dbmate |
 | 5 | Per-component Postgres roles | 4 | |

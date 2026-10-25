@@ -37,8 +37,23 @@ why, what was rejected, and what is still open. Update it when a decision change
 
 ## Commands
 
-To be filled in once the repo is scaffolded: build, test, migrate, deploy for each of `/web`,
-`/lambdas`, `/db`, `/infra`.
+Terraform version is pinned in `mise.toml`. Each folder under `/infra` is its own root module
+with its own state.
+
+**`/infra/bootstrap`** (state bucket + budget alert; applied rarely, state in its own S3 bucket):
+
+```sh
+aws sso login --profile admin && export AWS_PROFILE=admin
+terraform -chdir=infra/bootstrap init
+terraform -chdir=infra/bootstrap plan
+terraform -chdir=infra/bootstrap apply
+```
+
+Needs `infra/bootstrap/terraform.tfvars` (gitignored) with `alert_email`. Backend blocks only
+take literals, so the bucket name is hardcoded in `versions.tf`.
+
+Still to be filled in: build, test, migrate, deploy for `/web`, `/lambdas`, `/db`, and the main
+`/infra` stack.
 
 ## Conventions
 
