@@ -1,2 +1,3 @@
 [tools]
+"aqua:pressly/goose" = "latest"
 terraform = "1.17"

@@ -124,8 +124,13 @@ the SQS send failed.
 ### Web app (TanStack Start on the existing droplet) (Proposed)
 
 - Keeps the current DigitalOcean droplet and Caddy setup.
-- Auth via a library such as Better Auth instead of hand-rolled sessions. If used, generate its
-  user table early so `api_tokens` references the right table from day one.
+- Auth via Better Auth (Proposed) instead of hand-rolled sessions. Requirement: username and
+  password login now; Google, GitHub and Microsoft social login later. Better Auth covers both
+  (email/password plus the `username` plugin; social providers are config). The `users` table in
+  `00001_init.sql` already matches its user model, mapped to snake_case, so `api_tokens`
+  references the right table from day one. Its `session`, `account` and `verification` tables
+  arrive in a later migration with the web app; passwords and social logins both live in
+  `account`, so adding a provider needs no schema change.
 - Settings page to create and revoke ingest tokens (shown once, stored hashed).
 - Review inbox for provisional, flagged, and `needs_review` transactions. Category corrections
   update `merchant_aliases` and are logged as labelled data.
@@ -137,7 +142,8 @@ the SQS send failed.
 Milestone 1 needs only `users`, `api_tokens`, and `capture_events`.
 
 ```
-users             id, email, created_at, ...      (or the auth library's user table)
+users             id (uuid v7), name, email, email_verified, image, username,
+                  display_username, created_at, updated_at   (Better Auth's user model)
 
 api_tokens        id, user_id, token_hash (unique), scope ('ingest'), name,
                   created_at, last_used_at, revoked_at
@@ -178,6 +184,9 @@ incomplete or confidence is low.
 | Neon free plan for Postgres | Proposed | $0, reachable over TLS from Lambda without a VPC, pgvector, free branches for test databases |
 | SQS + DLQ + sweeper | Proposed | Retries and failure visibility without running servers; sweeper covers a failed SQS send after the DB write |
 | Wallet trigger first, notification trigger next | Proposed | Wallet trigger gives structured fields; notifications cover in-app and web Apple Pay and late Wallet records |
+| Postgres 18 on Neon | Decided | Built-in `uuidv7()` for time-ordered ids, no extension needed |
+| Better Auth for web app auth | Proposed | Username/password now, Google/GitHub/Microsoft later without schema changes; schema stays in goose migrations rather than its CLI |
+| goose for migrations | Decided | Go-native, so migrations can be embedded in a Go binary for CI; sqlc reads goose's annotated SQL files and ignores the Down sections. dbmate was the alternative |
 | Two milestones: raw capture first, enrichment second | Proposed | Proves the riskiest parts (payload, auth, Lambda to Neon) and collects real payloads before writing parsers |
 
 ## 6. Milestones and setup dependencies
@@ -188,9 +197,9 @@ incomplete or confidence is low.
 |---|---|---|---|
 | 1 | AWS account, budget alert, admin access for Terraform | - | **Done 2026-10-25.** Budget alert first; a public URL is the one way this can cost money. `infra/bootstrap`: $5/month COST budget, emails at 80% actual and 100% forecasted. Terraform runs as SSO profile `admin` |
 | 2 | Terraform state backend: S3 bucket with `use_lockfile` | 1 | **Done 2026-10-25.** No DynamoDB lock table needed. Bucket `kinji-v2-tfstate-271407076537` (versioned, SSE, public access blocked, TLS-only policy, noncurrent versions expire after 90 days); bootstrap state at `bootstrap/terraform.tfstate` |
-| 3 | Neon project in `ap-southeast-1` | - | Can be done in parallel with 1-2 |
-| 4 | Migrations: `users`, `api_tokens`, `capture_events` | 3 | goose or dbmate |
-| 5 | Per-component Postgres roles | 4 | |
+| 3 | Neon project in `ap-southeast-1` | - | **Done 2026-10-27.** Can be done in parallel with 1-2. Created by hand in the console, not Terraform |
+| 4 | Migrations: `users`, `api_tokens`, `capture_events` | 3 | **Done 2026-10-27** (`00001_init.sql`). goose, sequential SQL files in `db/migrations`, run over Neon's direct (unpooled) connection string |
+| 5 | Per-component Postgres roles | 4 | **Done 2026-10-28** (`00002_roles.sql`: `ingest`, `mint_token`). Created NOLOGIN by SQL, login and password enabled by hand |
 | 6 | `cmd/mint-token` CLI | 4, 5 | Creates the user and prints a token once; replaces the web app's settings page for now |
 | 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | |
 | 8 | Ingest Lambda code | 4 | |
@@ -253,6 +262,20 @@ transactions become `flagged`.
 Singapore banks must send outgoing-payment alerts above a user-set threshold (MAS E-Payments
 User Protection Guidelines); setting the threshold to the minimum makes alerts a reliable channel.
 
+### Telegram bot (distant)
+
+Read access to expenses from Telegram instead of building a mobile app. No password login:
+Telegram identifies the sender of every update (numeric user id), and the webhook's secret
+token proves the update came from Telegram. Auth is a one-time link from a logged-in web
+session: settings page issues a short-lived, single-use code as `t.me/<bot>?start=<code>`; the
+bot receives `/start <code>` and stores telegram user id ↔ `users.id`. Unlinked senders get nothing.
+
+- Link storage: a Better Auth `account` row (`provider_id = 'telegram'`) or a dedicated
+  `telegram_links` table. Either is a new migration; `users` does not change.
+- `users.email` is NOT NULL, so Telegram-only sign-up without an email is not supported. Linking
+  an existing account is the intended flow.
+- Its own Postgres role, read-only on transactions. Private chats only, never groups.
+
 ## 9. Open questions
 
 - What does the Wallet trigger actually send for `amount` (e.g. "S$12.30" vs "12.3"),
@@ -261,8 +284,8 @@ User Protection Guidelines); setting the threshold to the minimum makes alerts a
   Apple Pay? What does the text look like?
 - Can the iOS 27 notification trigger target the Wallet app on this phone?
 - Time window for cross-source matching, given Wallet records can arrive hours late.
-- Migration tool (goose vs dbmate) and TS DB library (Drizzle vs Kysely).
-- Auth library for the web app (Better Auth suggested).
+- TS DB library (Drizzle vs Kysely).
+- Confirm Better Auth when the web app starts (Proposed; see Web app in section 3).
 - Whether to add a custom domain for ingest later (Function URLs need CloudFront for that).
   The raw Function URL is stable for the life of the function, so it is fine in the Shortcut for now.
 
