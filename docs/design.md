@@ -201,7 +201,7 @@ incomplete or confidence is low.
 | 4 | Migrations: `users`, `api_tokens`, `capture_events` | 3 | **Done 2026-10-27** (`00001_init.sql`). goose, sequential SQL files in `db/migrations`, run over Neon's direct (unpooled) connection string |
 | 5 | Per-component Postgres roles | 4 | **Done 2026-10-28** (`00002_roles.sql`: `ingest`, `mint_token`). Created NOLOGIN by SQL, login and password enabled by hand |
 | 6 | `cmd/mint-token` CLI | 4, 5 | Creates the user and prints a token once; replaces the web app's settings page for now |
-| 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | |
+| 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | **Done 2026-10-28.** Also `/kinji-v2/mint-token/database-url` for the CLI, read at run time so the passwords live only in SSM. First resource in the main stack (`infra/main`, state key `main/terraform.tfstate`). Terraform creates `/kinji-v2/ingest/database-url` with write-only `value_wo = "placeholder"` and `value_wo_version = 1`; the real value is then set in the console. Write-only values never reach state, unlike `value` + `ignore_changes`, which still reads the decrypted value back into state on refresh. Bumping `value_wo_version` (or replacing the resource) resets it to the placeholder |
 | 8 | Ingest Lambda code | 4 | |
 | 9 | Terraform: IAM role, function, Function URL, reserved concurrency, log retention | 2, 7, 8 | Role can only write logs and read its own parameter |
 | 10 | Wallet automation in Shortcuts | 6, 9 | Test the deployed function with `curl` first |

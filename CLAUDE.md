@@ -40,6 +40,11 @@ why, what was rejected, and what is still open. Update it when a decision change
 Terraform version is pinned in `mise.toml`. Each folder under `/infra` is its own root module
 with its own state.
 
+**Each `/infra` folder must use its own backend `key`** (`<folder>/terraform.tfstate`). When
+creating a stack by copying another's `versions.tf`, change the key. A shared key makes one stack
+plan to destroy the other's resources, because they are in state but not in its config.
+Read the plan summary line before applying; don't use `-auto-approve` on an unreviewed plan.
+
 **`/infra/bootstrap`** (state bucket + budget alert; applied rarely, state in its own S3 bucket):
 
 ```sh
@@ -52,8 +57,21 @@ terraform -chdir=infra/bootstrap apply
 Needs `infra/bootstrap/terraform.tfvars` (gitignored) with `alert_email`. Backend blocks only
 take literals, so the bucket name is hardcoded in `versions.tf`.
 
-Still to be filled in: build, test, migrate, deploy for `/web`, `/lambdas`, `/db`, and the main
-`/infra` stack.
+**`/infra/main`** (app infrastructure: SSM parameters now, Lambdas and SQS later; state key
+`main/terraform.tfstate`):
+
+```sh
+terraform -chdir=infra/main init
+terraform -chdir=infra/main plan
+terraform -chdir=infra/main apply
+```
+
+Secret SSM parameters use write-only `value_wo = "placeholder"` with `value_wo_version = 1`;
+the real value is set in the console and never reaches state. Don't bump `value_wo_version`
+(it resets the value to the placeholder), and don't use `value` + `ignore_changes` (refresh
+reads the decrypted value into state).
+
+Still to be filled in: build, test, migrate, deploy for `/web`, `/lambdas`, `/db`.
 
 ## Conventions
 
