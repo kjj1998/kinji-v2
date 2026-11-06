@@ -80,9 +80,21 @@ Settings: reserved concurrency ~5 (it is a public URL), CloudWatch log retention
 pgx pool created outside the handler and reused across warm invocations, Neon pooled
 connection string read from SSM Parameter Store at cold start.
 
-Dedupe key (Proposed): hash of user, source, and the source's identifying fields with the
+Request body (Decided): a small envelope, stored whole as `payload`. Ingest reads only
+`source` (checked against the allowed values); everything else is parsed later by enrich.
+
+```json
+{ "source": "wallet_tap", "sent_at": "2026-10-31T12:34:56+08:00",
+  "data": { "merchant": "...", "amount": "...", "card": "...", "name": "..." } }
+```
+
+Dedupe key, milestone 1 (Decided): SHA-256 of `user_id`, `source`, and the raw body bytes.
+Catches exact resends without guessing field formats before real payloads exist.
+
+Dedupe key, later (Proposed): hash of user, source, and the source's identifying fields with the
 timestamp truncated to the minute. For Wallet taps: card, merchant, amount, `tapped_at`.
-For notifications: app, title, body, received time.
+For notifications: app, title, body, received time. Switch once real `capture_events` rows show
+the field formats; existing rows keep their old keys.
 
 ### SQS queue and dead-letter queue
 
@@ -202,7 +214,7 @@ incomplete or confidence is low.
 | 5 | Per-component Postgres roles | 4 | **Done 2026-10-28** (`00002_roles.sql`: `ingest`, `mint_token`). Created NOLOGIN by SQL, login and password enabled by hand |
 | 6 | `cmd/mint-token` CLI | 4, 5 | **Done 2026-10-31.** `create` / `revoke` subcommands; connects as `mint_token` with the URL from SSM. Creates the user and prints a token once; replaces the web app's settings page for now. Token format (Decided): `kji_` + base64url (no padding) of 32 random bytes; `token_hash` is SHA-256 of the full string including the prefix. The prefix makes leaked tokens easy to grep and to flag in secret scanners |
 | 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | **Done 2026-10-28.** Also `/kinji-v2/mint-token/database-url` for the CLI, read at run time so the passwords live only in SSM. First resource in the main stack (`infra/main`, state key `main/terraform.tfstate`). Terraform creates `/kinji-v2/ingest/database-url` with write-only `value_wo = "placeholder"` and `value_wo_version = 1`; the real value is then set in the console. Write-only values never reach state, unlike `value` + `ignore_changes`, which still reads the decrypted value back into state on refresh. Bumping `value_wo_version` (or replacing the resource) resets it to the placeholder |
-| 8 | Ingest Lambda code | 4 | |
+| 8 | Ingest Lambda code | 4 | **Done 2026-11-06.** Envelope body and milestone 1 dedupe key as in section 3 (Ingest Lambda). `internal/ingest` holds the handler behind a `Store` interface (tested with a fake store); `cmd/ingest` reads the connection string from SSM at cold start (parameter name from `DATABASE_URL_PARAM`) and uses a pgx pool with `MaxConns` 2. Responses: 405, 400 (bad body or source), 413 (over 16 KiB), 401 (every auth failure, one generic message), 500, and 202 with `status` `accepted`, `duplicate` or `dropped` (OTP-like payload, not stored). Dedupe key is SHA-256 of a `v1` tag, user ID, source and raw body, with separators. A failed `last_used_at` update is logged but still returns 202 |
 | 9 | Terraform: IAM role, function, Function URL, reserved concurrency, log retention | 2, 7, 8 | Role can only write logs and read its own parameter |
 | 10 | Wallet automation in Shortcuts | 6, 9 | Test the deployed function with `curl` first |
 

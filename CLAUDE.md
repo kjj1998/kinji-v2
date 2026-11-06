@@ -71,7 +71,17 @@ the real value is set in the console and never reaches state. Don't bump `value_
 (it resets the value to the placeholder), and don't use `value` + `ignore_changes` (refresh
 reads the decrypted value into state).
 
-Still to be filled in: build, test, migrate, deploy for `/web`, `/lambdas`, `/db`.
+**`/lambdas`** (Go module; run from `lambdas/`):
+
+```sh
+go vet ./... && go test ./...
+sqlc generate                    # after changing db/migrations or internal/db/queries
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap ./cmd/ingest
+```
+
+The binary must be named `bootstrap` for `provided.al2023`; it is gitignored.
+
+Still to be filled in: deploy for `/lambdas`; build, test, migrate, deploy for `/web` and `/db`.
 
 ## Conventions
 

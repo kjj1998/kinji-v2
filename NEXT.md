@@ -5,4 +5,5 @@
 5. ~~Per-component Postgres roles~~ (done 2026-10-28, `00002_roles.sql`)
 6. ~~`cmd/mint-token` CLI~~ (done 2026-10-31)
 7. ~~SSM SecureString with the `ingest` pooled connection string~~ (done 2026-10-28; `mint_token` too)
-8. Ingest Lambda code (`cmd/ingest`)
+8. ~~Ingest Lambda code (`cmd/ingest`)~~ (done 2026-11-06)
+9. Terraform: ingest IAM role, Lambda function, Function URL, reserved concurrency ~5, log retention ~14 days (`infra/main`)
