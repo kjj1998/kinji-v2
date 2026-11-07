@@ -6,6 +6,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "6.70.0"
     }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "2.8.1"
+    }
   }
   backend "s3" {
     bucket       = "kinji-v2-tfstate-271407076537"

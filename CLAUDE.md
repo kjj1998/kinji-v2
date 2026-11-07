@@ -76,12 +76,30 @@ reads the decrypted value into state).
 ```sh
 go vet ./... && go test ./...
 sqlc generate                    # after changing db/migrations or internal/db/queries
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -o bootstrap ./cmd/ingest
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -tags lambda.norpc -o bootstrap ./cmd/ingest
 ```
 
 The binary must be named `bootstrap` for `provided.al2023`; it is gitignored.
 
-Still to be filled in: deploy for `/lambdas`; build, test, migrate, deploy for `/web` and `/db`.
+Deploy the ingest Lambda: build the binary (above), then `terraform -chdir=infra/main plan` and
+`apply`. Terraform zips `lambdas/bootstrap` into `infra/main/build/` (gitignored) and redeploys when
+its hash changes, so a stale binary deploys stale code. Logs:
+`aws logs tail /aws/lambda/kinji-v2-ingest --since 15m`.
+
+**`/db`** (goose; run from the repo root over Neon's **direct** connection string as the owner
+role, not a component role):
+
+```sh
+read -s DIRECT_URL      # paste; keeps the owner password out of shell history
+goose -dir db/migrations postgres "$DIRECT_URL" status
+goose -dir db/migrations postgres "$DIRECT_URL" up
+unset DIRECT_URL
+```
+
+Never edit an applied migration; add a new file. When a query changes, check the role's grants:
+`ON CONFLICT (col)` needs SELECT on `col`, and `RETURNING` needs SELECT on the returned columns.
+
+Still to be filled in: build, test, migrate, deploy for `/web`.
 
 ## Conventions
 

@@ -48,3 +48,4 @@ terraform.rc
 # planout
 
 lambdas/bootstrap
+infra/main/build/

@@ -6,4 +6,5 @@
 6. ~~`cmd/mint-token` CLI~~ (done 2026-10-31)
 7. ~~SSM SecureString with the `ingest` pooled connection string~~ (done 2026-10-28; `mint_token` too)
 8. ~~Ingest Lambda code (`cmd/ingest`)~~ (done 2026-11-06)
-9. Terraform: ingest IAM role, Lambda function, Function URL, reserved concurrency ~5, log retention ~14 days (`infra/main`)
+9. ~~Terraform: ingest IAM role, Lambda function, Function URL, reserved concurrency ~5, log retention ~14 days (`infra/main`)~~ (done 2026-11-07; also `00003_ingest_dedupe_select.sql`)
+10. Wallet automation in Shortcuts: POST the envelope with the `iphone` token, then pay normally for about a week and inspect real rows
