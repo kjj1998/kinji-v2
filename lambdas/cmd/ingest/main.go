@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/kjj1998/kinji-v2/lambdas/internal/db"
@@ -37,7 +38,19 @@ func main() {
 
 // setup builds the handler and its dependencies.
 func setup(ctx context.Context, logger *slog.Logger) (*ingest.Handler, error) {
-	dbURL, err := loadDatabaseURL(ctx)
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+
+	queueURL := os.Getenv("ENRICH_QUEUE_URL")
+	if queueURL == "" {
+		return nil, errors.New("ENRICH_QUEUE_URL is not set")
+	}
+
+	enrichQueue := &sqsQueue{client: sqs.NewFromConfig(cfg), url: queueURL}
+
+	dbURL, err := loadDatabaseURL(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("load database url: %w", err)
 	}
@@ -47,19 +60,15 @@ func setup(ctx context.Context, logger *slog.Logger) (*ingest.Handler, error) {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
 
-	return &ingest.Handler{Store: db.New(pool), Log: logger}, nil
+	return &ingest.Handler{Store: db.New(pool), Queue: enrichQueue, Log: logger}, nil
 }
 
 // loadDatabaseURL reads the ingest connection string from SSM Parameter Store.
 // The value is a secret: never log it or include it in an error.
-func loadDatabaseURL(ctx context.Context) (string, error) {
+func loadDatabaseURL(ctx context.Context, cfg aws.Config) (string, error) {
 	paramName := os.Getenv("DATABASE_URL_PARAM")
 	if paramName == "" {
 		return "", errors.New("DATABASE_URL_PARAM is not set")
-	}
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return "", fmt.Errorf("load aws config: %w", err)
 	}
 	client := ssm.NewFromConfig(cfg)
 

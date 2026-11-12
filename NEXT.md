@@ -8,3 +8,7 @@
 8. ~~Ingest Lambda code (`cmd/ingest`)~~ (done 2026-11-06)
 9. ~~Terraform: ingest IAM role, Lambda function, Function URL, reserved concurrency ~5, log retention ~14 days (`infra/main`)~~ (done 2026-11-07; also `00003_ingest_dedupe_select.sql`)
 10. Wallet automation in Shortcuts: POST the envelope with the `iphone` token, then pay normally for about a week and inspect real rows
+11. ~~SQS queue + DLQ (`infra/main/sqs.tf`)~~ (done 2026-11-09)
+12. ~~Ingest sends `{event_id}` to SQS; `sqs:SendMessage` on the enrich queue only~~ (done 2026-11-09)
+- ~~`bank_sms` capture: `00004` widens the `source` CHECK, ingest allowlist, Shortcuts Message automation~~ (done 2026-11-12; covers in-app and web Apple Pay)
+13. `transactions`, `transaction_sources`, `merchant_aliases` migration; `enrich` Postgres role

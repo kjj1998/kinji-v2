@@ -57,7 +57,7 @@ terraform -chdir=infra/bootstrap apply
 Needs `infra/bootstrap/terraform.tfvars` (gitignored) with `alert_email`. Backend blocks only
 take literals, so the bucket name is hardcoded in `versions.tf`.
 
-**`/infra/main`** (app infrastructure: SSM parameters now, Lambdas and SQS later; state key
+**`/infra/main`** (app infrastructure: SSM parameters, the ingest Lambda, the enrich SQS queue and DLQ; state key
 `main/terraform.tfstate`):
 
 ```sh
@@ -107,8 +107,9 @@ Still to be filled in: build, test, migrate, deploy for `/web`.
 - **Timestamps** are stored in UTC. Display in Singapore time (+08:00).
 - **Schema** changes only go through SQL files in `/db/migrations`. Go types come from sqlc and
   TypeScript types come from the same schema (Drizzle or Kysely). Do not let a TypeScript ORM own migrations.
-- **Raw first:** the ingest Lambda stores payloads exactly as received. All parsing and cleanup
-  happens in `enrich`. Raw payloads are kept so events can be replayed for evals.
+- **Raw first:** the ingest Lambda stores the payload unmodified, as `jsonb`: the same data as
+  received, though Postgres normalizes key order and whitespace. All parsing and cleanup happens in
+  `enrich`. Raw payloads are kept so events can be replayed for evals.
 - **Idempotency everywhere:** SQS delivers at least once, the phone may retry, and one purchase can
   arrive from several sources. Every write must be safe to repeat.
 - **LLM calls sit behind an interface**, so logic can be tested without calling the API and the

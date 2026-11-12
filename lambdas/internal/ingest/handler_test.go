@@ -33,6 +33,11 @@ type fakeStore struct {
 	touched  []uuid.UUID
 }
 
+type fakeQueue struct {
+	sent    []uuid.UUID
+	sendErr error
+}
+
 func (f *fakeStore) GetActiveTokenByHash(_ context.Context, hash []byte) (db.GetActiveTokenByHashRow, error) {
 	if f.lookupErr != nil {
 		return db.GetActiveTokenByHashRow{}, f.lookupErr
@@ -60,6 +65,11 @@ func (f *fakeStore) TouchAPIToken(_ context.Context, id uuid.UUID) error {
 	return f.touchErr
 }
 
+func (q *fakeQueue) SendEvent(_ context.Context, id uuid.UUID) error {
+	q.sent = append(q.sent, id)
+	return q.sendErr
+}
+
 var (
 	testToken  = token.Generate()
 	testUserID = uuid.New()
@@ -70,12 +80,13 @@ const validBody = `{"source":"wallet_tap","sent_at":"2026-10-31T12:34:56+08:00",
 	`"data":{"merchant":"Kopitiam","amount":"4.50","card":"1234"}}`
 
 // newHandler returns a handler whose store knows testToken, plus the store for assertions.
-func newHandler() (*Handler, *fakeStore) {
+func newHandler() (*Handler, *fakeStore, *fakeQueue) {
 	store := &fakeStore{tokens: map[string]db.GetActiveTokenByHashRow{
 		string(token.Hash(testToken)): {UserID: testUserID, ID: testTokID},
 	}}
-	h := &Handler{Store: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	return h, store
+	queue := &fakeQueue{}
+	h := &Handler{Store: store, Queue: queue, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	return h, store, queue
 }
 
 // newRequest builds a Function URL request. Header names are lowercase, as Function URLs send them.
@@ -98,10 +109,12 @@ func TestHandle(t *testing.T) {
 		name       string
 		req        events.LambdaFunctionURLRequest
 		setup      func(*fakeStore) // optional: make the store fail or report a duplicate
+		sendErr    error            // optional: make the queue send fail
 		wantStatus int
 		wantBody   map[string]string // checked key by key; "id" is only checked to be present
 		wantInsert int
 		wantTouch  int
+		wantSend   int
 	}{
 		{
 			name:       "wrong method",
@@ -126,6 +139,7 @@ func TestHandle(t *testing.T) {
 			wantBody:   map[string]string{"status": "accepted"},
 			wantInsert: 1,
 			wantTouch:  1,
+			wantSend:   1,
 		},
 		{
 			name:       "body over the limit",
@@ -202,6 +216,20 @@ func TestHandle(t *testing.T) {
 			wantBody:   map[string]string{"status": "accepted"},
 			wantInsert: 1,
 			wantTouch:  1,
+			wantSend:   1,
+		},
+		{
+			// A real purchase SMS has a 4-digit card number but no OTP keyword, so it must not be dropped.
+			name: "bank sms purchase is accepted",
+			req: newRequest(http.MethodPost,
+				`{"source":"bank_sms","sender":"UOB","received_at":"2026-11-12T12:34:56+08:00",`+
+					`"text":"A transaction of SGD 93.46 was made with your UOB Card ending 1234 on 11/12/25 `+
+					`at SHOPEE SG MP. If unauthorised, call 24/7 Fraud Hotline now"}`, bearer),
+			wantStatus: http.StatusAccepted,
+			wantBody:   map[string]string{"status": "accepted"},
+			wantInsert: 1,
+			wantTouch:  1,
+			wantSend:   1,
 		},
 		{
 			name: "new event, base64 body",
@@ -214,6 +242,7 @@ func TestHandle(t *testing.T) {
 			wantBody:   map[string]string{"status": "accepted"},
 			wantInsert: 1,
 			wantTouch:  1,
+			wantSend:   1,
 		},
 		{
 			name:       "duplicate event",
@@ -239,15 +268,28 @@ func TestHandle(t *testing.T) {
 			wantBody:   map[string]string{"status": "accepted"},
 			wantInsert: 1,
 			wantTouch:  1,
+			wantSend:   1,
+		},
+		{
+			// The event is already in Postgres; the sweeper re-queues it, so the phone still gets a 202.
+			name:       "send fails but event is accepted",
+			req:        newRequest(http.MethodPost, validBody, bearer),
+			sendErr:    errors.New("sqs down"),
+			wantStatus: http.StatusAccepted,
+			wantBody:   map[string]string{"status": "accepted"},
+			wantInsert: 1,
+			wantTouch:  1,
+			wantSend:   1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h, store := newHandler()
+			h, store, queue := newHandler()
 			if tt.setup != nil {
 				tt.setup(store)
 			}
+			queue.sendErr = tt.sendErr
 
 			resp, err := h.Handle(context.Background(), tt.req)
 			if err != nil {
@@ -281,12 +323,15 @@ func TestHandle(t *testing.T) {
 			if len(store.touched) != tt.wantTouch {
 				t.Errorf("touches = %d, want %d", len(store.touched), tt.wantTouch)
 			}
+			if len(queue.sent) != tt.wantSend {
+				t.Errorf("sends = %d, want %d", len(queue.sent), tt.wantSend)
+			}
 		})
 	}
 }
 
 func TestHandleMethodNotAllowedSetsAllow(t *testing.T) {
-	h, _ := newHandler()
+	h, _, _ := newHandler()
 	resp, _ := h.Handle(context.Background(), newRequest(http.MethodGet, validBody, ""))
 	if got := resp.Headers["Allow"]; got != "POST" {
 		t.Errorf("Allow = %q, want POST", got)
@@ -295,8 +340,9 @@ func TestHandleMethodNotAllowedSetsAllow(t *testing.T) {
 
 // TestHandleWritesRawEvent checks what reaches the store, not just how many calls were made.
 func TestHandleWritesRawEvent(t *testing.T) {
-	h, store := newHandler()
-	if _, err := h.Handle(context.Background(), newRequest(http.MethodPost, validBody, "Bearer "+testToken)); err != nil {
+	h, store, queue := newHandler()
+	resp, err := h.Handle(context.Background(), newRequest(http.MethodPost, validBody, "Bearer "+testToken))
+	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(store.inserted) != 1 {
@@ -319,6 +365,14 @@ func TestHandleWritesRawEvent(t *testing.T) {
 
 	if len(store.touched) != 1 || store.touched[0] != testTokID {
 		t.Errorf("touched = %v, want [%s] (the token ID, not the event ID)", store.touched, testTokID)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal([]byte(resp.Body), &body); err != nil {
+		t.Fatalf("response body %q is not JSON: %v", resp.Body, err)
+	}
+	if len(queue.sent) != 1 || queue.sent[0].String() != body["id"] {
+		t.Errorf("sent = %v, want [%s] (the inserted event ID from the response)", queue.sent, body["id"])
 	}
 }
 

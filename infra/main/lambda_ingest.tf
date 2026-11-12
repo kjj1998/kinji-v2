@@ -42,6 +42,14 @@ data "aws_iam_policy_document" "ingest_access_policy" {
       aws_ssm_parameter.ingest_db_url.arn
     ]
   }
+
+  statement {
+    effect  = "Allow"
+    actions = ["sqs:SendMessage"]
+    resources = [
+      aws_sqs_queue.enrich.arn
+    ]
+  }
 }
 
 
@@ -65,10 +73,11 @@ resource "aws_lambda_function" "ingest" {
   environment {
     variables = {
       DATABASE_URL_PARAM = aws_ssm_parameter.ingest_db_url.name
+      ENRICH_QUEUE_URL   = aws_sqs_queue.enrich.url
     }
   }
 
-  depends_on = [aws_cloudwatch_log_group.ingest, aws_iam_role_policy.ingest_permissions, ]
+  depends_on = [aws_cloudwatch_log_group.ingest, aws_iam_role_policy.ingest_permissions]
 }
 
 resource "aws_lambda_function_url" "ingest" {
@@ -91,3 +100,4 @@ resource "aws_lambda_permission" "ingest_url_invoke_function" {
   principal                = "*"
   invoked_via_function_url = true
 }
+

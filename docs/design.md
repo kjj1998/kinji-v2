@@ -54,12 +54,28 @@ The TypeScript app and the Go Lambdas meet only at the Postgres schema and the
 - **Notification automation** (Proposed): iOS 27 "When I receive a notification from [app]",
   with up to three filters on message, title, subtitle. Point it at the Wallet app and the card
   issuer's app. Sends app name, title, subtitle, body, received time.
+- **SMS automation** (Decided 2026-11-11, working 2026-11-12): Shortcuts > Automation > + >
+  Message, Message Contains `was made with your`, Run Immediately (sender left as Any if the
+  bank's alphanumeric sender ID can't be picked). Actions: Format Date (Current Date, ISO 8601
+  with time), then Get Contents of URL with a JSON body `{source: "bank_sms", sender, text,
+  received_at}` (sender and text are the Shortcut Input's Sender and Content). Covers in-app and
+  website Apple Pay (and non-Apple Pay card use), which the Wallet trigger misses. Needed no new
+  infrastructure: `00004_capture_events_bank_sms.sql` widens the `source` CHECK, and ingest's
+  allowlist gained `bank_sms`. Example (UOB, redacted): "A transaction of SGD 93.46 was made with
+  your UOB Card ending 1234 on 11/12/25 at SHOPEE SG MP. If unauthorised, call 24/7 Fraud Hotline
+  now". The SMS has a date (DD/MM/YY) but no time, so `received_at` is the only timestamp. The
+  filter phrase excludes card bill payments ("You made/scheduled a bill payment(s) of SGD ...
+  to UOB Cards ..."), which are transfers, not expenses. The same sender also sends OTPs: the
+  filter keeps most of them on the phone, and the ingest OTP check drops the rest (a purchase SMS
+  has a 4-digit number but no OTP keyword, so it is not dropped; covered by a handler test). Set
+  the bank's alert threshold to the minimum.
 - Optional local journal: an "Append to Text File" action writing the same JSON to iCloud Drive
   before the POST, so failed requests can be replayed.
 
 Known limitations of the Wallet trigger (reported by other developers):
-- Fires only for in-store contactless taps. In-app and website Apple Pay do not trigger it.
-  This is why the notification trigger is planned.
+- Fires only for in-store contactless taps. In-app and website Apple Pay do not trigger it
+  (confirmed 2026-11-11 with a web purchase). The SMS automation covers this gap; the
+  notification trigger is still planned.
 - Merchant sometimes arrives blank and amount as 0.0.
 - Often times out waiting for Wallet's transaction record, which can arrive hours late.
 - Needs mobile data enabled for the Wallet app.
@@ -87,6 +103,12 @@ Request body (Decided): a small envelope, stored whole as `payload`. Ingest read
 { "source": "wallet_tap", "sent_at": "2026-10-31T12:34:56+08:00",
   "data": { "merchant": "...", "amount": "...", "card": "...", "name": "..." } }
 ```
+
+Payload storage (Decided 2026-11-09): `jsonb`, not byte-exact. Postgres parses the body, so key
+order, whitespace and duplicate keys are normalized; the data is unchanged. Enrich and evals read
+fields, and `jsonb` can be queried and indexed. Consequence: the v1 dedupe key (below) is hashed
+from the raw request bytes before insert and cannot be recomputed from a stored row. Rejected:
+`json` or `text`/`bytea` for byte-exact storage, since nothing needs the original bytes.
 
 Dedupe key, milestone 1 (Decided): SHA-256 of `user_id`, `source`, and the raw body bytes.
 Catches exact resends without guessing field formats before real payloads exist.
@@ -161,7 +183,7 @@ api_tokens        id, user_id, token_hash (unique), scope ('ingest'), name,
                   created_at, last_used_at, revoked_at
 
 capture_events    id (uuid v7), user_id, source ('wallet_tap' | 'wallet_notification' |
-                  'bank_notification'), payload (jsonb, exactly as received),
+                  'bank_notification' | 'bank_sms'), payload (jsonb, unmodified but normalized),
                   dedupe_key (unique), status ('pending' | 'processing' | 'done' |
                   'failed' | 'discarded'), attempts, last_error, received_at, processed_at
 
@@ -211,7 +233,7 @@ incomplete or confidence is low.
 | 2 | Terraform state backend: S3 bucket with `use_lockfile` | 1 | **Done 2026-10-25.** No DynamoDB lock table needed. Bucket `kinji-v2-tfstate-271407076537` (versioned, SSE, public access blocked, TLS-only policy, noncurrent versions expire after 90 days); bootstrap state at `bootstrap/terraform.tfstate` |
 | 3 | Neon project in `ap-southeast-1` | - | **Done 2026-10-27.** Can be done in parallel with 1-2. Created by hand in the console, not Terraform |
 | 4 | Migrations: `users`, `api_tokens`, `capture_events` | 3 | **Done 2026-10-27** (`00001_init.sql`). goose, sequential SQL files in `db/migrations`, run over Neon's direct (unpooled) connection string |
-| 5 | Per-component Postgres roles | 4 | **Done 2026-10-28** (`00002_roles.sql`: `ingest`, `mint_token`). Created NOLOGIN by SQL, login and password enabled by hand. Fixed 2026-11-07 (`00003_ingest_dedupe_select.sql`): `INSERT ... ON CONFLICT (dedupe_key)` also needs SELECT on the conflict-target column, so `ingest` got `SELECT (dedupe_key)`. The fake-store unit tests can't catch missing grants; only a real query as the real role does |
+| 5 | Per-component Postgres roles | 4 | **Done 2026-10-28** (`00002_roles.sql`: `ingest`, `mint_token`). Created NOLOGIN by SQL, login and password enabled by hand. Fixed 2026-11-07 (`00003_ingest_dedupe_select.sql`): `INSERT ... ON CONFLICT (dedupe_key)` also needs SELECT on the conflict-target column, so `ingest` got `SELECT (dedupe_key)`. The fake-store unit tests can't catch missing grants; only a real query as the real role does. 2026-11-12: `00004_capture_events_bank_sms.sql` widens the `capture_events.source` CHECK with `bank_sms` (Down fails if `bank_sms` rows exist, by design) |
 | 6 | `cmd/mint-token` CLI | 4, 5 | **Done 2026-10-31.** `create` / `revoke` subcommands; connects as `mint_token` with the URL from SSM. Creates the user and prints a token once; replaces the web app's settings page for now. Token format (Decided): `kji_` + base64url (no padding) of 32 random bytes; `token_hash` is SHA-256 of the full string including the prefix. The prefix makes leaked tokens easy to grep and to flag in secret scanners |
 | 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | **Done 2026-10-28.** Also `/kinji-v2/mint-token/database-url` for the CLI, read at run time so the passwords live only in SSM. First resource in the main stack (`infra/main`, state key `main/terraform.tfstate`). Terraform creates `/kinji-v2/ingest/database-url` with write-only `value_wo = "placeholder"` and `value_wo_version = 1`; the real value is then set in the console. Write-only values never reach state, unlike `value` + `ignore_changes`, which still reads the decrypted value back into state on refresh. Bumping `value_wo_version` (or replacing the resource) resets it to the placeholder |
 | 8 | Ingest Lambda code | 4 | **Done 2026-11-06.** Envelope body and milestone 1 dedupe key as in section 3 (Ingest Lambda). `internal/ingest` holds the handler behind a `Store` interface (tested with a fake store); `cmd/ingest` reads the connection string from SSM at cold start (parameter name from `DATABASE_URL_PARAM`) and uses a pgx pool with `MaxConns` 2. Responses: 405, 400 (bad body or source), 413 (over 16 KiB), 401 (every auth failure, one generic message), 500, and 202 with `status` `accepted`, `duplicate` or `dropped` (OTP-like payload, not stored). Dedupe key is SHA-256 of a `v1` tag, user ID, source and raw body, with separators. A failed `last_used_at` update is logged but still returns 202 |
@@ -224,8 +246,8 @@ After step 10: pay normally for about a week and inspect real rows before writin
 
 | # | What | Depends on | Notes |
 |---|---|---|---|
-| 11 | SQS queue + DLQ | 2 | |
-| 12 | Ingest sends `{event_id}`; grant it `sqs:SendMessage` on that queue only | 9, 11 | |
+| 11 | SQS queue + DLQ | 2 | **Done 2026-11-09** (`infra/main/sqs.tf`). `kinji-v2-enrich`: standard, SSE-SQS, visibility 360 s (6x a planned 60 s enrich timeout), long polling 20 s, default 4-day retention, redrive after 5 receives. DLQ `kinji-v2-enrich-dlq`: 14-day retention, redrive-allow limited to the enrich queue. The redrive-allow policy is a separate `aws_sqs_queue_redrive_allow_policy` resource; setting it inline on the DLQ while the main queue's `redrive_policy` points at the DLQ is a dependency cycle |
+| 12 | Ingest sends `{event_id}`; grant it `sqs:SendMessage` on that queue only | 9, 11 | **Done 2026-11-09.** Message body is `internal/queue.EventMessage` (`{"event_id": "<uuid>"}`), shared with enrich and the sweeper. Handler depends on a `Queue` interface (fake in tests); `cmd/ingest` implements it with the SQS client, a 2 s timeout per send, queue URL from `ENRICH_QUEUE_URL` (checked at cold start). Sent only for new rows: not for duplicates or dropped payloads. A failed send is logged with the event ID and still returns 202; the row stays `pending` for the sweeper. IAM: one extra statement, `sqs:SendMessage` on the enrich queue only (not the DLQ; SSE-SQS needs no KMS permissions). Verified with `curl`: accepted, then 1 message available on the queue |
 | 13 | `transactions`, `transaction_sources`, `merchant_aliases`; enrich role | 4 | |
 | 14 | LLM API key in SSM | 1 | |
 | 15 | Enrich Lambda with SQS trigger | 11, 13, 14 | Batch failures, visibility timeout 6x function timeout |
@@ -264,7 +286,8 @@ transactions become `flagged`.
 
 | Flow | Likely capture channel | Notes |
 |---|---|---|
-| Apple Pay tap (credit cards) | Wallet trigger, Wallet/bank notification | Current focus |
+| Apple Pay tap (credit cards) | Wallet trigger, Wallet/bank notification, bank SMS | Current focus |
+| Apple Pay in apps and websites | Bank SMS (Wallet trigger does not fire) | SMS automation, working since 2026-11-12 |
 | PayNow QR | Bank outgoing-payment alert (push via notification trigger, or email) | Payee is often the business's registered name, not the stall name: needs merchant aliases |
 | Shopee / Lazada | Order confirmation (email or app notification) + card/wallet alert | One charge, many items; vouchers mean item prices don't sum to the charge; refunds come later |
 | SimplyGo EZ-Link top-up | Card alert or top-up receipt | Count the top-up as transport spend, never also the fares |
@@ -292,6 +315,10 @@ bot receives `/start <code>` and stores telegram user id ↔ `users.id`. Unlinke
 
 - What does the Wallet trigger actually send for `amount` (e.g. "S$12.30" vs "12.3"),
   `merchant`, and `name`? How do overseas charges look? Answer from real `capture_events` rows.
+- ~~Does the Wallet transaction trigger fire for online and in-app Apple Pay?~~ Answered
+  2026-11-11: no, in-person taps only. The bank does send an SMS for the card in use, so online
+  purchases are covered by the SMS automation (section 3), added 2026-11-12 before milestone 2
+  so SMS rows collect alongside Wallet taps while waiting for real data.
 - Do the Wallet app and each card issuer's app send a notification for in-app and web
   Apple Pay? What does the text look like?
 - Can the iOS 27 notification trigger target the Wallet app on this phone?

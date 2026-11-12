@@ -23,8 +23,13 @@ type Store interface {
 	TouchAPIToken(ctx context.Context, id uuid.UUID) error
 }
 
+type Queue interface {
+	SendEvent(ctx context.Context, eventID uuid.UUID) error
+}
+
 type Handler struct {
 	Store Store
+	Queue Queue
 	Log   *slog.Logger
 }
 
@@ -36,6 +41,7 @@ var allowedSources = map[string]bool{
 	"wallet_tap":          true,
 	"wallet_notification": true,
 	"bank_notification":   true,
+	"bank_sms":            true,
 }
 
 var errUnauthorized = errors.New("unauthorized")
@@ -102,6 +108,9 @@ func (h *Handler) Handle(ctx context.Context, req events.LambdaFunctionURLReques
 
 	if id == uuid.Nil {
 		return respond(http.StatusAccepted, map[string]string{"status": "duplicate"}), nil
+	}
+	if err := h.Queue.SendEvent(ctx, id); err != nil {
+		h.Log.ErrorContext(ctx, "send event to queue failed", "event_id", id, "err", err)
 	}
 	return respond(http.StatusAccepted, map[string]string{"status": "accepted", "id": id.String()}), nil
 }
