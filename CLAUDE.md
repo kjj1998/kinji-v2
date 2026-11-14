@@ -115,8 +115,11 @@ Still to be filled in: build, test, migrate, deploy for `/web`.
 - **LLM calls sit behind an interface**, so logic can be tested without calling the API and the
   provider can be swapped (e.g. a self-hosted OpenAI-compatible model later).
 - **Each component has its own Postgres role and IAM role** with the minimum permissions it needs.
-- Categories start from Kinji's list: Entertainment, Food, Groceries, Health, Income, Shopping,
-  Subscriptions, Transport, Utilities, Credit, Transfer, Taxes, Accommodation, Insurance.
+- **Categories** live in the `categories` table (name, description, type), seeded from Kinji's list
+  plus Travel. Change them with SQL, not a migration; transactions reference them by foreign key and
+  take their type (expense, income, credit, transfer) from the category. Categorize by what the
+  money was for, not the payment channel: a refund or a friend's repayment is an inflow in the
+  original category.
 
 ## Rules
 

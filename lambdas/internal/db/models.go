@@ -35,6 +35,47 @@ type CaptureEvent struct {
 	ProcessedAt *time.Time
 }
 
+type Category struct {
+	Name        string
+	Description string
+	Type        string
+	CreatedAt   time.Time
+}
+
+type MerchantAlias struct {
+	UserID    uuid.UUID
+	RawName   string
+	Merchant  string
+	Category  string
+	Origin    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type Transaction struct {
+	ID          uuid.UUID
+	UserID      uuid.UUID
+	OccurredAt  time.Time
+	MerchantRaw pgtype.Text
+	Merchant    pgtype.Text
+	AmountCents int64
+	Currency    string
+	Direction   string
+	Category    pgtype.Text
+	Card        pgtype.Text
+	Status      string
+	Confidence  pgtype.Float4
+	Notes       pgtype.Text
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type TransactionSource struct {
+	CaptureEventID uuid.UUID
+	TransactionID  uuid.UUID
+	CreatedAt      time.Time
+}
+
 type User struct {
 	ID              uuid.UUID
 	Name            string

@@ -152,8 +152,9 @@ the SQS send failed.
   100 CU-hours per project per month, compute scales to zero after 5 minutes idle and resumes in
   a few hundred ms.
 - pgvector available for later merchant similarity and semantic search.
-- One Postgres role per component: `ingest` (insert events, read token hashes), `enrich`,
-  `sweeper`, `app`, and a migration role.
+- One Postgres role per component: `ingest` (insert events, read token hashes), `enrich`
+  (read events and update only their progress columns; read categories; write transactions,
+  links and aliases; no DELETE), `sweeper`, `app`, and a migration role.
 
 ### Web app (TanStack Start on the existing droplet) (Proposed)
 
@@ -187,20 +188,46 @@ capture_events    id (uuid v7), user_id, source ('wallet_tap' | 'wallet_notifica
                   dedupe_key (unique), status ('pending' | 'processing' | 'done' |
                   'failed' | 'discarded'), attempts, last_error, received_at, processed_at
 
-transactions      id, user_id, occurred_at, merchant_raw, merchant, amount_cents, currency,
-                  direction ('INFLOW' | 'OUTFLOW'), type ('expense' | 'income' | 'transfer'),
-                  category, card, status ('provisional' | 'confirmed' | 'flagged' |
+categories        name (PK), description, type ('expense' | 'income' | 'credit' |
+                  'transfer'), created_at   (global, not per user; seeded in 00005)
+
+transactions      id, user_id, occurred_at, merchant_raw, merchant, amount_cents (>= 0),
+                  currency, direction ('inflow' | 'outflow'), category (FK -> categories,
+                  nullable), card, status ('provisional' | 'confirmed' | 'flagged' |
                   'needs_review'), confidence, notes, created_at, updated_at
 
-transaction_sources  transaction_id, capture_event_id   (many events -> one transaction;
+transaction_sources  capture_event_id (PK), transaction_id   (many events -> one transaction;
                   statement lines join here too once reconciliation exists)
 
-merchant_aliases  user_id, raw_name, merchant, category, origin ('user' | 'llm'), created_at
+merchant_aliases  user_id, raw_name (normalized), merchant, category (FK -> categories),
+                  origin ('user' | 'llm'), created_at, updated_at; PK (user_id, raw_name)
 ```
 
-Transaction `type` matters once bank and card statements are both ingested: paying the credit
-card bill from the bank account is a `transfer`, not an expense. Counting it would double every
-card purchase. The same applies to e-wallet top-ups and moves between own accounts.
+Categories (Decided 2026-11-13): a table, not a CHECK, so the list changes with an `INSERT` or
+`UPDATE` (as the owner role now, the web app's settings page later) and no migration, while
+foreign keys from `transactions.category` and `merchant_aliases.category` still reject names
+that are not in it. `ON UPDATE CASCADE` makes a rename follow through; deleting a category in
+use is refused. Seeded with Kinji's 14 plus `Travel` (airfare and trip bookings, kept out of
+Transport so trips don't distort everyday spending). `description` is what the enrich prompt
+shows the LLM, with the boundaries between categories spelled out; the LLM's answer is
+constrained to an enum of the names and validated in Go, and anything unknown or low-confidence
+goes to `needs_review`. Global rather than per user while there is one user.
+
+Type lives on the category, not the transaction (Decided 2026-11-13), as in Kinji, where it was
+derived from the category: `expense` counts toward total spent, `income` toward income and net
+savings, `credit` (cashback, interest) toward net savings only, `transfer` nowhere. Storing it
+per transaction would let a row say `Food` + `transfer`; deriving it (one join on a 15-row
+table) makes that impossible and lets a rule change fix all history with one `UPDATE`. Paying
+the credit card bill from the bank account is a `Transfer`; counting it would double every card
+purchase. The same applies to e-wallet top-ups and moves between own accounts.
+
+Categorize by purpose, not payment channel (Decided 2026-11-13). PayNow and refunds take the
+category of what they paid for: a refund, or a friend paying back their share of a meal, is an
+`inflow` in `Food`, so net Food is your real share without special reimbursement logic.
+`Transfer` is only for money that stays yours (own accounts, loans to or from people, card bill
+payments). Payments to or from a person default to `needs_review`, since an alert shows only a
+name; regular payees (landlord, tutor) become `merchant_aliases` after the first review.
+Direction values are lowercase like every other CHECK in the schema (Kinji used uppercase).
 
 Transaction lifecycle: `provisional` when captured in real time, `confirmed` when matched to a
 statement line, `flagged` when it never appears on the statement, `needs_review` when data is
@@ -248,7 +275,7 @@ After step 10: pay normally for about a week and inspect real rows before writin
 |---|---|---|---|
 | 11 | SQS queue + DLQ | 2 | **Done 2026-11-09** (`infra/main/sqs.tf`). `kinji-v2-enrich`: standard, SSE-SQS, visibility 360 s (6x a planned 60 s enrich timeout), long polling 20 s, default 4-day retention, redrive after 5 receives. DLQ `kinji-v2-enrich-dlq`: 14-day retention, redrive-allow limited to the enrich queue. The redrive-allow policy is a separate `aws_sqs_queue_redrive_allow_policy` resource; setting it inline on the DLQ while the main queue's `redrive_policy` points at the DLQ is a dependency cycle |
 | 12 | Ingest sends `{event_id}`; grant it `sqs:SendMessage` on that queue only | 9, 11 | **Done 2026-11-09.** Message body is `internal/queue.EventMessage` (`{"event_id": "<uuid>"}`), shared with enrich and the sweeper. Handler depends on a `Queue` interface (fake in tests); `cmd/ingest` implements it with the SQS client, a 2 s timeout per send, queue URL from `ENRICH_QUEUE_URL` (checked at cold start). Sent only for new rows: not for duplicates or dropped payloads. A failed send is logged with the event ID and still returns 202; the row stays `pending` for the sweeper. IAM: one extra statement, `sqs:SendMessage` on the enrich queue only (not the DLQ; SSE-SQS needs no KMS permissions). Verified with `curl`: accepted, then 1 message available on the queue |
-| 13 | `transactions`, `transaction_sources`, `merchant_aliases`; enrich role | 4 | |
+| 13 | `transactions`, `transaction_sources`, `merchant_aliases`; enrich role | 4 | **Done 2026-11-14.** `00005_transactions.sql` adds `categories` (seeded), `transactions`, `transaction_sources` and `merchant_aliases` (see section 4 for the category, type and categorize-by-purpose decisions). `transaction_sources.capture_event_id` is the primary key, so an event links once and enrich's `ON CONFLICT (capture_event_id) DO NOTHING` makes redelivery harmless. `merchant_aliases` PK `(user_id, raw_name)` is the upsert target; `raw_name` is normalized in Go; a `user` row is never overwritten by an `llm` one. `00006_enrich_role.sql`: `enrich` NOLOGIN, SELECT on `capture_events` with UPDATE only on `status`, `attempts`, `last_error`, `processed_at` (raw payloads can't be changed), SELECT on `categories`, SELECT/INSERT/UPDATE on `transactions` and `merchant_aliases`, SELECT/INSERT on `transaction_sources`, no DELETE. Login, password and its SSM parameter wait for step 15 |
 | 14 | LLM API key in SSM | 1 | |
 | 15 | Enrich Lambda with SQS trigger | 11, 13, 14 | Batch failures, visibility timeout 6x function timeout |
 | 16 | Sweeper Lambda + EventBridge Scheduler | 11, 13 | |
@@ -291,7 +318,7 @@ transactions become `flagged`.
 | PayNow QR | Bank outgoing-payment alert (push via notification trigger, or email) | Payee is often the business's registered name, not the stall name: needs merchant aliases |
 | Shopee / Lazada | Order confirmation (email or app notification) + card/wallet alert | One charge, many items; vouchers mean item prices don't sum to the charge; refunds come later |
 | SimplyGo EZ-Link top-up | Card alert or top-up receipt | Count the top-up as transport spend, never also the fares |
-| PayNow to friends (bill splits) | Bank outgoing-payment alert | Needs a "what was this for?" prompt; incoming reimbursements should link to the original charge |
+| PayNow to friends (bill splits) | Bank outgoing-payment alert | Needs a "what was this for?" prompt. Categorized by purpose: your share is an outflow in e.g. Food, a friend's repayment an inflow in Food (section 4), so totals need no link; linking a repayment to the original charge for display is open |
 | GIRO deductions (insurance) | Expected entry from schedule; bank alert if sent | Confirm on match; flag if amount changes or it is missing |
 
 Singapore banks must send outgoing-payment alerts above a user-set threshold (MAS E-Payments
