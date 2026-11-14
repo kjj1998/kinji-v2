@@ -1,6 +1,6 @@
 data "archive_file" "ingest" {
   type        = "zip"
-  source_file = "${path.module}/../../lambdas/bootstrap"
+  source_file = "${path.module}/../../lambdas/build/ingest/bootstrap"
   output_path = "${path.module}/build/ingest.zip"
 }
 

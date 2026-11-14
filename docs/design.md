@@ -128,16 +128,52 @@ the field formats; existing rows keep their old keys.
 
 - Batch processing with `ReportBatchItemFailures`, so one bad message does not retry the batch.
 - Timeout around 60 s to allow for the LLM call.
-- Per event: load raw payload, parse amount and currency, check `merchant_aliases`, call the
-  LLM only for merchants not seen before or for free-text notifications, then write or update
-  a transaction.
+- Per event (Decided 2026-11-14): load the raw payload, have the LLM extract the fields, check
+  them in Go, apply `merchant_aliases`, then write the transaction. No hand-written parser per
+  source or bank: message formats change and new banks appear, and one path handles SMS, Wallet
+  taps and notifications alike. One LLM call per event does extraction and categorization
+  together (structured output); at ~300 events/month this costs cents with a small model.
+- The LLM extracts, Go verifies. Output: `kind` (purchase, refund, bill_payment, transfer,
+  declined, other), `amount` as written in the message (a string, e.g. `"93.46"`), `currency`
+  (ISO), `card` (last 4), `date`, `merchant_raw`, `merchant`, `category` (enum built from
+  `categories`), `confidence`. Go checks that the amount, card and raw merchant appear in the
+  message text, that the currency is a 3-letter code, that the date is within a few days of
+  `received_at` (catches DD/MM vs MM/DD), and that the category exists. Go converts the amount
+  string to cents (never via float); time of day comes from `received_at`. A failed check or low
+  confidence still writes the transaction, as `needs_review` with the reason in `notes`. Kinds
+  that are not money movements (declined, other) mark the event `discarded`.
+- `merchant_aliases` overrides the LLM's merchant and category afterwards, so a user correction
+  always wins. It no longer saves LLM calls (extraction needs the call anyway).
+- Extraction accuracy (section 7) is the main eval and decides the model.
 - Cross-source matching: one purchase can produce a Wallet tap event, a Wallet notification,
   and a bank notification. Attach a new event to an existing transaction when card, amount,
-  and time window match, instead of creating a duplicate.
-- Writes must be idempotent (at-least-once delivery).
+  and time window match, instead of creating a duplicate. Deferred to after the first enrich
+  version: `bank_sms` (online) and `wallet_tap` (in-store) rarely overlap yet, so the first
+  version writes one transaction per event.
+- Writes must be idempotent (at-least-once delivery): the LLM call happens outside the DB
+  transaction; inside it, the event row is locked (`FOR UPDATE`) and its status re-checked
+  before writing, and the link insert uses `ON CONFLICT (capture_event_id) DO NOTHING`.
 - Blank merchant or zero amount from the Wallet trigger: store as `needs_review`, do not drop.
-- For notification text the LLM must also classify the message (completed purchase, refund,
-  declined, promotion, other) and return a confidence score. Low confidence goes to review.
+- Low confidence goes to review.
+- LLM access is provider-neutral (Decided 2026-11-14). `internal/llm` defines an `Extractor`
+  interface with kinji's own `Input` and `Extraction` types, plus the shared prompt and the output
+  JSON schema (generated from `Extraction`); no SDK type leaves an adapter package. First adapter:
+  `internal/llm/openaicompat` (official OpenAI Go SDK, `openai-go`) against any OpenAI-compatible
+  Chat Completions endpoint: Anthropic's compatibility layer now, and OpenAI, Gemini, OpenRouter,
+  DeepSeek or a self-hosted model (Ollama, vLLM) by changing config. A fake adapter for tests.
+  A native adapter (e.g. the Anthropic Go SDK) can be added behind the same interface if the
+  compatibility layer's limits start to matter. The eval runner takes the same interface, so
+  providers and models are compared on the same labelled events.
+- Configured by env vars on the Lambda: `LLM_BASE_URL` (e.g. `https://api.anthropic.com/v1/`),
+  `LLM_MODEL` (e.g. `claude-haiku-5-5`), and `LLM_API_KEY_PARAM` (SSM name of the key). Switching
+  model or provider is a Terraform env change, plus a new key in SSM for a new provider.
+- Anthropic's OpenAI compatibility layer, per its docs (checked 2026-11-14): meant mainly for
+  testing and comparing models, "not considered a long-term or production-ready solution for most
+  use cases". What kinji needs works: `response_format` with `json_schema` and `strict: true` is
+  supported (structured outputs). Not available through it: effort control (`reasoning_effort`
+  is ignored, so the model's default effort applies), prompt caching, returned thinking, and
+  native refusal handling. Acceptable at kinji's size; the Go checks above don't depend on the
+  provider.
 
 ### Sweeper Lambda
 
@@ -248,6 +284,7 @@ incomplete or confidence is low.
 | Postgres 18 on Neon | Decided | Built-in `uuidv7()` for time-ordered ids, no extension needed |
 | Better Auth for web app auth | Proposed | Username/password now, Google/GitHub/Microsoft later without schema changes; schema stays in goose migrations rather than its CLI |
 | goose for migrations | Decided | Go-native, so migrations can be embedded in a Go binary for CI; sqlc reads goose's annotated SQL files and ignores the Down sections. dbmate was the alternative |
+| LLM extracts fields, Go verifies; provider-neutral `Extractor` interface, first adapter OpenAI-compatible | Decided 2026-11-14 | No parser per message format or bank; Go checks that amount, card and merchant appear in the text, so an invented number can't reach a transaction. One interface lets models and providers be swapped by config and compared in evals |
 | Two milestones: raw capture first, enrichment second | Proposed | Proves the riskiest parts (payload, auth, Lambda to Neon) and collects real payloads before writing parsers |
 
 ## 6. Milestones and setup dependencies
@@ -264,7 +301,7 @@ incomplete or confidence is low.
 | 6 | `cmd/mint-token` CLI | 4, 5 | **Done 2026-10-31.** `create` / `revoke` subcommands; connects as `mint_token` with the URL from SSM. Creates the user and prints a token once; replaces the web app's settings page for now. Token format (Decided): `kji_` + base64url (no padding) of 32 random bytes; `token_hash` is SHA-256 of the full string including the prefix. The prefix makes leaked tokens easy to grep and to flag in secret scanners |
 | 7 | SSM SecureString with the ingest role's pooled connection string | 1, 5 | **Done 2026-10-28.** Also `/kinji-v2/mint-token/database-url` for the CLI, read at run time so the passwords live only in SSM. First resource in the main stack (`infra/main`, state key `main/terraform.tfstate`). Terraform creates `/kinji-v2/ingest/database-url` with write-only `value_wo = "placeholder"` and `value_wo_version = 1`; the real value is then set in the console. Write-only values never reach state, unlike `value` + `ignore_changes`, which still reads the decrypted value back into state on refresh. Bumping `value_wo_version` (or replacing the resource) resets it to the placeholder |
 | 8 | Ingest Lambda code | 4 | **Done 2026-11-06.** Envelope body and milestone 1 dedupe key as in section 3 (Ingest Lambda). `internal/ingest` holds the handler behind a `Store` interface (tested with a fake store); `cmd/ingest` reads the connection string from SSM at cold start (parameter name from `DATABASE_URL_PARAM`) and uses a pgx pool with `MaxConns` 2. Responses: 405, 400 (bad body or source), 413 (over 16 KiB), 401 (every auth failure, one generic message), 500, and 202 with `status` `accepted`, `duplicate` or `dropped` (OTP-like payload, not stored). Dedupe key is SHA-256 of a `v1` tag, user ID, source and raw body, with separators. A failed `last_used_at` update is logged but still returns 202 |
-| 9 | Terraform: IAM role, function, Function URL, reserved concurrency, log retention | 2, 7, 8 | **Done 2026-11-07** (`infra/main/lambda_ingest.tf`). Role can only write logs and read its own parameter. Function `kinji-v2-ingest`: arm64, timeout 10 s for Neon cold starts, reserved concurrency 5, log group created by Terraform with 14-day retention. Code is a local zip: `archive_file` zips `lambdas/bootstrap` and `source_code_hash` triggers redeploys, so the binary must be built before `plan`. How CI deploys code is open until step 17. Function URL with auth `NONE` (the bearer token is the auth) needs two permissions: `lambda:InvokeFunctionUrl` (condition: URL auth type `NONE`) and `lambda:InvokeFunction` limited to `invoked_via_function_url`, so the direct Invoke API stays closed. Verified with `curl`: accepted, duplicate, 401, 405, OTP dropped, `last_used_at` set |
+| 9 | Terraform: IAM role, function, Function URL, reserved concurrency, log retention | 2, 7, 8 | **Done 2026-11-07** (`infra/main/lambda_ingest.tf`). Role can only write logs and read its own parameter. Function `kinji-v2-ingest`: arm64, timeout 10 s for Neon cold starts, reserved concurrency 5, log group created by Terraform with 14-day retention. Code is a local zip: `archive_file` zips `lambdas/build/ingest/bootstrap` (per-Lambda folder since 2026-11-14; was `lambdas/bootstrap`) and `source_code_hash` triggers redeploys, so the binary must be built before `plan`. How CI deploys code is open until step 17. Function URL with auth `NONE` (the bearer token is the auth) needs two permissions: `lambda:InvokeFunctionUrl` (condition: URL auth type `NONE`) and `lambda:InvokeFunction` limited to `invoked_via_function_url`, so the direct Invoke API stays closed. Verified with `curl`: accepted, duplicate, 401, 405, OTP dropped, `last_used_at` set |
 | 10 | Wallet automation in Shortcuts | 6, 9 | Test the deployed function with `curl` first |
 
 After step 10: pay normally for about a week and inspect real rows before writing parsers.

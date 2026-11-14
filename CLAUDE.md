@@ -76,15 +76,19 @@ reads the decrypted value into state).
 ```sh
 go vet ./... && go test ./...
 sqlc generate                    # after changing db/migrations or internal/db/queries
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -tags lambda.norpc -o bootstrap ./cmd/ingest
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -tags lambda.norpc -o build/ingest/bootstrap ./cmd/ingest
 ```
 
-The binary must be named `bootstrap` for `provided.al2023`; it is gitignored.
+Each Lambda builds to its own folder, `lambdas/build/<name>/bootstrap` (swap `ingest` for the
+`cmd/` name in both places). The binary must be named `bootstrap` for `provided.al2023`, so a
+shared output path would let one Lambda's build overwrite another's and deploy the wrong code.
+`lambdas/build/` is gitignored.
 
-Deploy the ingest Lambda: build the binary (above), then `terraform -chdir=infra/main plan` and
-`apply`. Terraform zips `lambdas/bootstrap` into `infra/main/build/` (gitignored) and redeploys when
-its hash changes, so a stale binary deploys stale code. Logs:
-`aws logs tail /aws/lambda/kinji-v2-ingest --since 15m`.
+Deploy a Lambda: build its binary (above), then `terraform -chdir=infra/main plan` and `apply`.
+Terraform zips `lambdas/build/<name>/bootstrap` into `infra/main/build/<name>.zip` (gitignored) and
+redeploys when its hash changes, so a stale binary deploys stale code. Any change under `internal/`
+that the Lambda imports changes its hash, even if behaviour is the same. Logs:
+`aws logs tail /aws/lambda/kinji-v2-<name> --since 15m`.
 
 **`/db`** (goose; run from the repo root over Neon's **direct** connection string as the owner
 role, not a component role):
