@@ -12,4 +12,5 @@
 12. ~~Ingest sends `{event_id}` to SQS; `sqs:SendMessage` on the enrich queue only~~ (done 2026-11-09)
 - ~~`bank_sms` capture: `00004` widens the `source` CHECK, ingest allowlist, Shortcuts Message automation~~ (done 2026-11-12; covers in-app and web Apple Pay)
 13. ~~`categories`, `transactions`, `transaction_sources`, `merchant_aliases`; `enrich` Postgres role~~ (done 2026-11-14, `00005` and `00006`)
-14. LLM API key in SSM
+14. ~~LLM API key in SSM (`/kinji-v2/enrich/llm-api-key`; also `/kinji-v2/enrich/database-url` placeholder)~~ (done 2026-11-14)
+15. Enrich Lambda with SQS trigger

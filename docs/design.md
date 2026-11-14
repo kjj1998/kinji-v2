@@ -276,7 +276,7 @@ After step 10: pay normally for about a week and inspect real rows before writin
 | 11 | SQS queue + DLQ | 2 | **Done 2026-11-09** (`infra/main/sqs.tf`). `kinji-v2-enrich`: standard, SSE-SQS, visibility 360 s (6x a planned 60 s enrich timeout), long polling 20 s, default 4-day retention, redrive after 5 receives. DLQ `kinji-v2-enrich-dlq`: 14-day retention, redrive-allow limited to the enrich queue. The redrive-allow policy is a separate `aws_sqs_queue_redrive_allow_policy` resource; setting it inline on the DLQ while the main queue's `redrive_policy` points at the DLQ is a dependency cycle |
 | 12 | Ingest sends `{event_id}`; grant it `sqs:SendMessage` on that queue only | 9, 11 | **Done 2026-11-09.** Message body is `internal/queue.EventMessage` (`{"event_id": "<uuid>"}`), shared with enrich and the sweeper. Handler depends on a `Queue` interface (fake in tests); `cmd/ingest` implements it with the SQS client, a 2 s timeout per send, queue URL from `ENRICH_QUEUE_URL` (checked at cold start). Sent only for new rows: not for duplicates or dropped payloads. A failed send is logged with the event ID and still returns 202; the row stays `pending` for the sweeper. IAM: one extra statement, `sqs:SendMessage` on the enrich queue only (not the DLQ; SSE-SQS needs no KMS permissions). Verified with `curl`: accepted, then 1 message available on the queue |
 | 13 | `transactions`, `transaction_sources`, `merchant_aliases`; enrich role | 4 | **Done 2026-11-14.** `00005_transactions.sql` adds `categories` (seeded), `transactions`, `transaction_sources` and `merchant_aliases` (see section 4 for the category, type and categorize-by-purpose decisions). `transaction_sources.capture_event_id` is the primary key, so an event links once and enrich's `ON CONFLICT (capture_event_id) DO NOTHING` makes redelivery harmless. `merchant_aliases` PK `(user_id, raw_name)` is the upsert target; `raw_name` is normalized in Go; a `user` row is never overwritten by an `llm` one. `00006_enrich_role.sql`: `enrich` NOLOGIN, SELECT on `capture_events` with UPDATE only on `status`, `attempts`, `last_error`, `processed_at` (raw payloads can't be changed), SELECT on `categories`, SELECT/INSERT/UPDATE on `transactions` and `merchant_aliases`, SELECT/INSERT on `transaction_sources`, no DELETE. Login, password and its SSM parameter wait for step 15 |
-| 14 | LLM API key in SSM | 1 | |
+| 14 | LLM API key in SSM | 1 | **Done 2026-11-14** (`infra/main/ssm.tf`). `/kinji-v2/enrich/llm-api-key` (provider-neutral name; currently an Anthropic key) and `/kinji-v2/enrich/database-url` (placeholder until step 15 enables `enrich` login), both `SecureString` with write-only `value_wo`. Direct provider rather than Bedrock for now. Key named `kinji-v2-enrich`, pasted straight into the SSM console. Cost cap: prepaid API credits with auto-reload off (per-workspace spend limits are not generally available in the Anthropic Console); when credits run out, enrich fails, messages go to the DLQ and events stay in Postgres for redrive. Enrich's IAM read access to `/kinji-v2/enrich/*` comes with step 15 |
 | 15 | Enrich Lambda with SQS trigger | 11, 13, 14 | Batch failures, visibility timeout 6x function timeout |
 | 16 | Sweeper Lambda + EventBridge Scheduler | 11, 13 | |
 | 17 | GitHub Actions: test, build, Terraform, migrations, via GitHub OIDC | after 9 | |
@@ -337,6 +337,12 @@ bot receives `/start <code>` and stores telegram user id ↔ `users.id`. Unlinke
 - `users.email` is NOT NULL, so Telegram-only sign-up without an email is not supported. Linking
   an existing account is the intended flow.
 - Its own Postgres role, read-only on transactions. Private chats only, never groups.
+- Questions like "how much have I spent this month?" (Proposed 2026-11-14): LLM tool use over
+  fixed, parameterized sqlc queries (`get_spending(start, end, category?)`, `list_transactions`,
+  ...) run as the bot's read-only role and scoped to the linked user. Postgres does the money
+  math in integer cents; the model only picks tools and arguments and phrases the result. No
+  model-written SQL. Its own LLM API key (separate SSM parameter). The same query functions could
+  later be exposed over MCP for Claude Desktop or Claude Code.
 
 ## 9. Open questions
 
@@ -350,6 +356,13 @@ bot receives `/start <code>` and stores telegram user id ↔ `users.id`. Unlinke
   Apple Pay? What does the text look like?
 - Can the iOS 27 notification trigger target the Wallet app on this phone?
 - Time window for cross-source matching, given Wallet records can arrive hours late.
+- LLM provider and model for enrich. Proposed 2026-11-14: Anthropic direct, Claude Haiku 5.5 at
+  low effort with structured output (category enum built from `categories`), since it is short
+  classification at ~300 events/month (cents per month) and `merchant_aliases` skips repeat
+  merchants; Claude Sonnet 5.5 for the Telegram bot's tool use. Confirm with an eval on 30-50
+  labelled real events, comparing shortlisted models (possibly OpenAI or Gemini paid tiers, or
+  Bedrock, which would replace the API key with IAM and fall under the AWS budget alert). Pick the
+  cheapest model that clears the accuracy bar; fix category descriptions before upsizing.
 - TS DB library (Drizzle vs Kysely).
 - Confirm Better Auth when the web app starts (Proposed; see Web app in section 3).
 - Whether to add a custom domain for ingest later (Function URLs need CloudFront for that).
